@@ -466,7 +466,7 @@ def main():
             break
 
         try:
-            ans = input(f"  {DIM}[n]ext page / [q]uit / new query:{RESET} ").strip()
+            ans = input(f"  {DIM}[n]ext / [q]uit / [s] new search:{RESET} ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -475,6 +475,15 @@ def main():
             break
         elif ans == "n":
             page += 1
+        elif ans == "s":
+            try:
+                new_q = input(f"  {DIM}search:{RESET} ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if new_q:
+                query = new_q
+                page = 1
         else:
             query = ans
             page = 1
