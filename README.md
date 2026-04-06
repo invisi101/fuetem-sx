@@ -9,7 +9,7 @@ For the best experience, run a local SearXNG instance. If you don't have one, se
 ## Install
 
 ```
-git clone <repo-url>
+git clone https://github.com/invisi101/fuetem-sx.git
 cd fuetem-sx
 ./install.sh
 ```
