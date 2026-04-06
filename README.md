@@ -19,6 +19,7 @@ The installer copies `sx` to `~/.local/bin/` and walks you through picking a sea
 To uninstall:
 
 ```
+cd fuetem-sx
 ./uninstall.sh
 ```
 
