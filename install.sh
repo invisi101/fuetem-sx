@@ -108,7 +108,7 @@ TEST_OK=1
 
 if [ "$BACKEND" = "duckduckgo" ]; then
     echo -n "  Testing DuckDuckGo... "
-    if curl -sf "https://html.duckduckgo.com/html/?q=test" -o /dev/null 2>/dev/null; then
+    if curl -sf -A "Mozilla/5.0" "https://html.duckduckgo.com/html/?q=test" -o /dev/null 2>/dev/null; then
         echo -e "${GREEN}OK${RESET}"
     else
         echo -e "${YELLOW}failed${RESET}"
