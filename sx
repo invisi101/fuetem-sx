@@ -1,0 +1,484 @@
+#!/usr/bin/env python3
+"""sx — search the web from your terminal."""
+
+import sys
+import os
+import re
+import json
+import webbrowser
+import urllib.request
+import urllib.parse
+from html.parser import HTMLParser
+
+# --- Config -----------------------------------------------------------------
+
+CONFIG_FILE = os.path.join(os.path.expanduser("~/.config/sx"), "config.json")
+
+DEFAULT_CONFIG = {
+    "backend": "duckduckgo",
+    "searxng_url": "http://127.0.0.1:8888",
+    "searxng_public_url": "",
+}
+
+SEARXNG_PUBLIC = [
+    "https://searx.be",
+    "https://search.ononoki.org",
+    "https://paulgo.io",
+    "https://searx.tiekoetter.com",
+    "https://search.sapti.me",
+]
+
+BACKEND_NAMES = {
+    "duckduckgo":     "DuckDuckGo",
+    "searxng":        "SearXNG (local)",
+    "searxng-public": "SearXNG (public)",
+}
+
+# --- Terminal ---------------------------------------------------------------
+
+GREEN  = "\033[32m"
+YELLOW = "\033[33m"
+DIM    = "\033[2m"
+BOLD   = "\033[1m"
+RESET  = "\033[0m"
+ULINE  = "\033[4m"
+
+
+def link(url, text=None):
+    text = text or url
+    return f"\033]8;;{url}\033\\{ULINE}{text}{RESET}\033]8;;\033\\"
+
+
+# --- HTTP -------------------------------------------------------------------
+
+def _get(url, headers=None, timeout=10):
+    hdrs = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) sx/2.0"}
+    if headers:
+        hdrs.update(headers)
+    req = urllib.request.Request(url, headers=hdrs)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode()
+
+
+# --- Config helpers ---------------------------------------------------------
+
+def load_config():
+    try:
+        with open(CONFIG_FILE) as f:
+            cfg = json.load(f)
+        for k, v in DEFAULT_CONFIG.items():
+            cfg.setdefault(k, v)
+        return cfg
+    except (FileNotFoundError, json.JSONDecodeError):
+        return dict(DEFAULT_CONFIG)
+
+
+def save_config(cfg):
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
+# --- DuckDuckGo -------------------------------------------------------------
+
+class _DDGParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.results = []
+        self._cur = None
+        self._field = None
+        self._text = []
+
+    def handle_starttag(self, tag, attrs):
+        d = dict(attrs)
+        cls = d.get("class", "")
+        if tag == "a" and "result__a" in cls:
+            raw = d.get("href", "")
+            self._cur = {"title": "", "url": self._resolve(raw),
+                         "content": "", "engines": ["duckduckgo"]}
+            self._field = "title"
+            self._text = []
+        elif tag == "a" and "result__snippet" in cls and self._cur:
+            self._field = "content"
+            self._text = []
+
+    def handle_data(self, data):
+        if self._field:
+            self._text.append(data)
+
+    def handle_endtag(self, tag):
+        if tag != "a" or not self._field:
+            return
+        text = " ".join("".join(self._text).split())
+        if self._field == "title" and self._cur:
+            self._cur["title"] = text
+            self._field = None
+        elif self._field == "content" and self._cur:
+            self._cur["content"] = text
+            self._field = None
+            if self._cur["url"]:
+                self.results.append(self._cur)
+            self._cur = None
+
+    @staticmethod
+    def _resolve(raw):
+        # skip DDG ads
+        if "duckduckgo.com/y.js" in raw or "ad_provider" in raw:
+            return ""
+        if "duckduckgo.com/l/" in raw:
+            u = raw if raw.startswith("http") else "https:" + raw
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(u).query)
+            if "uddg" in qs:
+                return qs["uddg"][0]
+        if raw.startswith("//"):
+            return "https:" + raw
+        return raw
+
+
+def search_duckduckgo(query, page=1, time_range=None, **_):
+    params = {"q": query}
+    if time_range:
+        m = {"day": "d", "week": "w", "month": "m", "year": "y"}
+        if time_range in m:
+            params["df"] = m[time_range]
+    html = _get(f"https://html.duckduckgo.com/html/?{urllib.parse.urlencode(params)}")
+    p = _DDGParser()
+    p.feed(html)
+    per = 25
+    start = (page - 1) * per
+    return p.results[start:start + per], {}
+
+
+# --- SearXNG ----------------------------------------------------------------
+
+def _search_searxng(query, base_url, page=1, time_range=None, category=None,
+                    engines=None, timeout=10):
+    params = {"q": query, "format": "json", "pageno": page}
+    if time_range:
+        params["time_range"] = time_range
+    if category:
+        params["categories"] = category
+    if engines:
+        params["engines"] = engines
+    url = f"{base_url.rstrip('/')}/search?{urllib.parse.urlencode(params)}"
+    data = json.loads(_get(url, timeout=timeout))
+    results = [{"title": r.get("title", ""), "url": r.get("url", ""),
+                "content": r.get("content", ""), "engines": r.get("engines", [])}
+               for r in data.get("results", [])]
+    extra = {"answers": data.get("answers", []),
+             "infoboxes": data.get("infoboxes", []),
+             "suggestions": data.get("suggestions", [])}
+    return results, extra
+
+
+def search_searxng_local(query, cfg, **kw):
+    return _search_searxng(query, cfg["searxng_url"], **kw)
+
+
+def search_searxng_public(query, cfg=None, page=1, **kw):
+    instances = list(SEARXNG_PUBLIC)
+    preferred = (cfg or {}).get("searxng_public_url", "")
+    if preferred:
+        instances.insert(0, preferred)
+    for inst in instances:
+        try:
+            return _search_searxng(query, inst, page=page, timeout=6, **kw)
+        except Exception:
+            continue
+    print(f"  {YELLOW}All public SearXNG instances failed. Try a different backend.{RESET}",
+          file=sys.stderr)
+    return [], {}
+
+
+# --- Dispatcher -------------------------------------------------------------
+
+def do_search(cfg, query, page=1, time_range=None, category=None, engines=None):
+    b = cfg["backend"]
+    kw = dict(page=page, time_range=time_range, category=category, engines=engines)
+    if b == "duckduckgo":
+        return search_duckduckgo(query, **kw)
+    elif b == "searxng":
+        return search_searxng_local(query, cfg, **kw)
+    elif b == "searxng-public":
+        return search_searxng_public(query, cfg=cfg, **kw)
+    else:
+        print(f"  Unknown backend: {b}", file=sys.stderr)
+        sys.exit(1)
+
+
+# --- Display ----------------------------------------------------------------
+
+def display(results, extra, page, limit=None):
+    infoboxes = extra.get("infoboxes", [])
+    answers = extra.get("answers", [])
+    suggestions = extra.get("suggestions", [])
+
+    if infoboxes:
+        for box in infoboxes:
+            print(f"\n{BOLD}{box.get('infobox', '')}{RESET}")
+            content = box.get("content", "")
+            if content:
+                print(f"  {content[:300]}")
+            for attr in box.get("attributes", [])[:5]:
+                print(f"  {DIM}{attr.get('label', '')}:{RESET} {attr.get('value', '')}")
+            for u in box.get("urls", [])[:3]:
+                print(f"  {link(u['url'], u.get('title', u['url']))}")
+            print()
+
+    if answers:
+        for ans in answers:
+            if isinstance(ans, dict):
+                ans = ans.get("answer", str(ans))
+            print(f"\n  {BOLD}{ans}{RESET}\n")
+
+    if limit is not None:
+        results = results[:limit]
+
+    if not results:
+        print("  No results found.")
+        return False
+
+    for i, r in enumerate(results, start=(page - 1) * len(results) + 1):
+        print(f" {BOLD}{i}.{RESET} {BOLD}{r['title']}{RESET}")
+        print(f"    {link(r['url'], GREEN + r['url'] + RESET)}")
+        if r.get("content"):
+            print(f"    {r['content'][:200]}")
+        if r.get("engines"):
+            print(f"    {DIM}{', '.join(r['engines'])}{RESET}")
+        print()
+
+    if suggestions:
+        print(f"  {DIM}suggestions:{RESET} {', '.join(suggestions)}")
+        print()
+
+    return True
+
+
+# --- Setup ------------------------------------------------------------------
+
+def setup():
+    cfg = load_config()
+
+    print(f"\n  {BOLD}sx setup{RESET}")
+    print(f"  Current backend: {BOLD}{BACKEND_NAMES.get(cfg['backend'], cfg['backend'])}{RESET}\n")
+
+    choices = [
+        ("duckduckgo",     "DuckDuckGo",       "no setup needed"),
+        ("searxng-public", "SearXNG (public)",  "no setup, less reliable"),
+        ("searxng",        "SearXNG (local)",   "your own instance — best results"),
+    ]
+
+    for i, (_, name, note) in enumerate(choices, 1):
+        print(f"    {BOLD}{i}.{RESET} {name:<22} {DIM}{note}{RESET}")
+
+    print()
+    try:
+        pick = input("  Choose backend [1-3]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\n  Cancelled.")
+        return
+
+    if not pick.isdigit() or not 1 <= int(pick) <= 3:
+        print("  Invalid choice.")
+        return
+
+    backend_id = choices[int(pick) - 1][0]
+    cfg["backend"] = backend_id
+
+    try:
+        if backend_id == "searxng-public":
+            print(f"\n  {DIM}Browse https://searx.space/ and pick an instance with green uptime.{RESET}")
+            print(f"  {DIM}Not all instances support JSON — we'll test it for you.{RESET}")
+            url = input(f"\n  Paste an instance URL (or leave blank to use built-in list): ").strip()
+            if url:
+                cfg["searxng_public_url"] = url
+
+        elif backend_id == "searxng":
+            url = input(f"  SearXNG URL (enter for {cfg['searxng_url']}): ").strip()
+            if url:
+                cfg["searxng_url"] = url
+            instance = cfg["searxng_url"]
+
+            # test the connection
+            print(f"\n  Testing {instance} ...")
+            ok = False
+            try:
+                test_url = f"{instance.rstrip('/')}/search?q=test&format=json"
+                json.loads(_get(test_url, timeout=5))
+                print(f"  {BOLD}Connection OK — JSON API is working.{RESET}")
+                ok = True
+            except urllib.error.HTTPError as e:
+                if e.code == 403:
+                    print(f"  {YELLOW}Got 403 Forbidden — JSON API is not enabled.{RESET}")
+                    print(f"\n  To fix this, edit your SearXNG settings.yml:")
+                    print(f"    1. Find the 'search' section and add 'json' to formats:")
+                    print(f"       {DIM}search:{RESET}")
+                    print(f"       {DIM}  formats:{RESET}")
+                    print(f"       {DIM}    - html{RESET}")
+                    print(f"       {DIM}    - json{RESET}")
+                    print(f"    2. Optionally disable the rate limiter for local use:")
+                    print(f"       {DIM}server:{RESET}")
+                    print(f"       {DIM}  limiter: false{RESET}")
+                    print(f"    3. Restart SearXNG (depends on how it is installed on your system):")
+                    print(f"       {DIM}systemd:  sudo systemctl restart searxng{RESET}")
+                    print(f"       {DIM}docker:   docker restart searxng{RESET}")
+                    print(f"       {DIM}manual:   stop and re-run your start script{RESET}")
+                else:
+                    print(f"  {YELLOW}Got HTTP {e.code} from instance.{RESET}")
+            except urllib.error.URLError:
+                print(f"  {YELLOW}Could not connect to {instance}{RESET}")
+                print(f"  Make sure SearXNG is running on that address.")
+            except Exception as e:
+                print(f"  {YELLOW}Connection test failed: {e}{RESET}")
+
+            if not ok:
+                save_anyway = input(f"\n  Save this config anyway? [y/N]: ").strip().lower()
+                if save_anyway != "y":
+                    print("  Setup cancelled. Run sx --setup to try again.")
+                    return
+
+    except (EOFError, KeyboardInterrupt):
+        print("\n  Cancelled.")
+        return
+
+    save_config(cfg)
+    print(f"\n  {BOLD}Backend set to: {BACKEND_NAMES[backend_id]}{RESET}")
+    print(f"  Config saved to {DIM}{CONFIG_FILE}{RESET}\n")
+
+
+# --- CLI --------------------------------------------------------------------
+
+HELP = f"""{BOLD}sx{RESET} — search the web from your terminal
+
+{BOLD}Usage:{RESET}  sx [options] <query>
+
+{BOLD}Options:{RESET}
+  -N            show top N results (e.g. -10, -5, -20)
+  -t RANGE      time range: day, week, month, year
+  -c CATEGORY   search category (SearXNG only): general, news,
+                videos, images, it, science, files, music
+  -e ENGINE     restrict to engine(s) (SearXNG only), comma-separated
+  -b BACKEND    override backend for this search:
+                duckduckgo, searxng, searxng-public
+  -o            open the first result in your browser
+  -h            show this help
+  --setup       configure default backend
+
+{BOLD}Examples:{RESET}
+  sx arch linux                     search with default backend
+  sx -10 python asyncio             top 10 results only
+  sx -t week rust release           results from the past week
+  sx -c news ukraine                search news category (SearXNG)
+  sx -e reddit,github neovim        reddit + github only (SearXNG)
+  sx -b duckduckgo quantum computing  one-off search via DuckDuckGo
+  sx -t day -5 openai               past day, top 5 results
+  sx -o python docs pathlib         open first result in browser
+  sx --setup                        pick your default backend
+"""
+
+
+def parse_args(argv):
+    query_parts = []
+    limit = None
+    time_range = None
+    category = None
+    engines = None
+    open_first = False
+    backend_override = None
+
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            print(HELP)
+            sys.exit(0)
+        elif a == "--setup":
+            setup()
+            sys.exit(0)
+        elif a == "-o":
+            open_first = True
+        elif a == "-t" and i + 1 < len(argv):
+            i += 1
+            time_range = argv[i]
+        elif a == "-c" and i + 1 < len(argv):
+            i += 1
+            category = argv[i]
+        elif a == "-e" and i + 1 < len(argv):
+            i += 1
+            engines = argv[i]
+        elif a == "-b" and i + 1 < len(argv):
+            i += 1
+            backend_override = argv[i]
+        elif re.match(r"^-\d+$", a):
+            limit = int(a[1:])
+        else:
+            query_parts.append(a)
+        i += 1
+
+    return (" ".join(query_parts), limit, time_range, category,
+            engines, open_first, backend_override)
+
+
+# --- Main -------------------------------------------------------------------
+
+def main():
+    if len(sys.argv) < 2:
+        print(HELP)
+        sys.exit(1)
+
+    (query, limit, time_range, category,
+     engines, open_first, backend_override) = parse_args(sys.argv[1:])
+
+    if not query:
+        sys.exit(0)
+
+    cfg = load_config()
+    if backend_override:
+        if backend_override not in BACKEND_NAMES:
+            print(f"  Unknown backend: {backend_override}", file=sys.stderr)
+            print(f"  Available: {', '.join(BACKEND_NAMES)}", file=sys.stderr)
+            sys.exit(1)
+        cfg["backend"] = backend_override
+
+    page = 1
+
+    while True:
+        try:
+            results, extra = do_search(cfg, query, page, time_range, category, engines)
+        except KeyboardInterrupt:
+            print()
+            break
+        except Exception as e:
+            print(f"  Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        if open_first:
+            if results:
+                url = results[0]["url"]
+                print(f"  Opening: {link(url)}")
+                webbrowser.open(url)
+            else:
+                print("  No results to open.")
+            break
+
+        has_results = display(results, extra, page, limit)
+        if not has_results or limit is not None:
+            break
+
+        try:
+            ans = input(f"  {DIM}[n]ext page / [q]uit / new query:{RESET} ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if ans in ("q", ""):
+            break
+        elif ans == "n":
+            page += 1
+        else:
+            query = ans
+            page = 1
+
+
+if __name__ == "__main__":
+    main()
