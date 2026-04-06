@@ -20,6 +20,20 @@ mkdir -p "$INSTALL_DIR"
 cp "$SCRIPT_DIR/sx" "$INSTALL_DIR/sx"
 chmod +x "$INSTALL_DIR/sx"
 
+# Install shell completions
+BASH_COMP_DIR="${HOME}/.local/share/bash-completion/completions"
+ZSH_COMP_DIR="${HOME}/.local/share/zsh/site-functions"
+
+if [ -f "$SCRIPT_DIR/sx.bash" ]; then
+    mkdir -p "$BASH_COMP_DIR"
+    cp "$SCRIPT_DIR/sx.bash" "$BASH_COMP_DIR/sx"
+fi
+
+if [ -f "$SCRIPT_DIR/sx.zsh" ]; then
+    mkdir -p "$ZSH_COMP_DIR"
+    cp "$SCRIPT_DIR/sx.zsh" "$ZSH_COMP_DIR/_sx"
+fi
+
 echo ""
 echo -e "  ${BOLD}sx installed${RESET} to $INSTALL_DIR/sx"
 

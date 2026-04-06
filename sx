@@ -36,12 +36,39 @@ BACKEND_NAMES = {
 
 # --- Terminal ---------------------------------------------------------------
 
-GREEN  = "\033[32m"
-YELLOW = "\033[33m"
-DIM    = "\033[2m"
-BOLD   = "\033[1m"
-RESET  = "\033[0m"
-ULINE  = "\033[4m"
+GREEN   = "\033[32m"
+YELLOW  = "\033[33m"
+BLUE    = "\033[34m"
+MAGENTA = "\033[35m"
+CYAN    = "\033[36m"
+RED     = "\033[31m"
+DIM     = "\033[2m"
+BOLD    = "\033[1m"
+RESET   = "\033[0m"
+ULINE   = "\033[4m"
+
+ENGINE_COLORS = {
+    "google":      RED,
+    "duckduckgo":  YELLOW,
+    "brave":       RED,
+    "bing":        BLUE,
+    "wikipedia":   DIM,
+    "reddit":      RED,
+    "github":      DIM,
+    "startpage":   BLUE,
+    "mojeek":      GREEN,
+    "qwant":       MAGENTA,
+    "yahoo":       MAGENTA,
+}
+DEFAULT_ENGINE_COLOR = CYAN
+
+
+def colorize_engines(engines):
+    parts = []
+    for e in engines:
+        c = ENGINE_COLORS.get(e, DEFAULT_ENGINE_COLOR)
+        parts.append(f"{c}{e}{RESET}")
+    return ", ".join(parts)
 
 
 def link(url, text=None):
@@ -77,6 +104,19 @@ def save_config(cfg):
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
+
+
+# --- Cache ------------------------------------------------------------------
+
+_cache = {}
+
+
+def cached_search(search_fn, cache_key, *args, **kwargs):
+    if cache_key in _cache:
+        return _cache[cache_key]
+    result = search_fn(*args, **kwargs)
+    _cache[cache_key] = result
+    return result
 
 
 # --- DuckDuckGo -------------------------------------------------------------
@@ -135,7 +175,7 @@ class _DDGParser(HTMLParser):
         return raw
 
 
-def search_duckduckgo(query, page=1, time_range=None, **_):
+def _fetch_duckduckgo(query, time_range=None):
     params = {"q": query}
     if time_range:
         m = {"day": "d", "week": "w", "month": "m", "year": "y"}
@@ -144,9 +184,16 @@ def search_duckduckgo(query, page=1, time_range=None, **_):
     html = _get(f"https://html.duckduckgo.com/html/?{urllib.parse.urlencode(params)}")
     p = _DDGParser()
     p.feed(html)
+    return p.results, {}
+
+
+def search_duckduckgo(query, page=1, time_range=None, **_):
+    cache_key = ("ddg", query, time_range)
+    all_results, extra = cached_search(_fetch_duckduckgo, cache_key,
+                                       query, time_range)
     per = 25
     start = (page - 1) * per
-    return p.results[start:start + per], {}
+    return all_results[start:start + per], extra
 
 
 # --- SearXNG ----------------------------------------------------------------
@@ -188,6 +235,15 @@ def search_searxng_public(query, cfg=None, page=1, **kw):
     print(f"  {YELLOW}All public SearXNG instances failed. Try a different backend.{RESET}",
           file=sys.stderr)
     return [], {}
+
+
+# --- Bangs ------------------------------------------------------------------
+
+def handle_bang(query):
+    """Detect DuckDuckGo !bangs and open in browser."""
+    url = f"https://duckduckgo.com/?q={urllib.parse.quote(query)}"
+    print(f"  Opening bang redirect: {link(url)}")
+    webbrowser.open(url)
 
 
 # --- Dispatcher -------------------------------------------------------------
@@ -244,7 +300,7 @@ def display(results, extra, page, limit=None):
         if r.get("content"):
             print(f"    {r['content'][:200]}")
         if r.get("engines"):
-            print(f"    {DIM}{', '.join(r['engines'])}{RESET}")
+            print(f"    {colorize_engines(r['engines'])}")
         print()
 
     if suggestions:
@@ -357,17 +413,25 @@ HELP = f"""{BOLD}sx{RESET} — search the web from your terminal
   -t RANGE      time range: day, week, month, year
   -c CATEGORY   search category (SearXNG only): general, news,
                 videos, images, it, science, files, music
+  -i            shortcut for -c images
   -e ENGINE     restrict to engine(s) (SearXNG only), comma-separated
   -b BACKEND    override backend for this search:
                 duckduckgo, searxng, searxng-public
   -o            open the first result in your browser
   -h            show this help
   --setup       configure default backend
+  --status      show current configuration
+
+{BOLD}Bangs:{RESET}
+  sx !w linux                       search Wikipedia via DuckDuckGo bang
+  sx !yt funny cats                 search YouTube via bang
+  sx !gh neovim                     search GitHub via bang
 
 {BOLD}Examples:{RESET}
   sx arch linux                     search with default backend
   sx -10 python asyncio             top 10 results only
   sx -t week rust release           results from the past week
+  sx -i wallpapers                  image search (SearXNG)
   sx -c news ukraine                search news category (SearXNG)
   sx -e reddit,github neovim        reddit + github only (SearXNG)
   sx -b duckduckgo quantum computing  one-off search via DuckDuckGo
@@ -395,8 +459,20 @@ def parse_args(argv):
         elif a == "--setup":
             setup()
             sys.exit(0)
+        elif a == "--status":
+            cfg = load_config()
+            print(f"\n  {BOLD}sx status{RESET}")
+            print(f"  Backend:    {BOLD}{BACKEND_NAMES.get(cfg['backend'], cfg['backend'])}{RESET}")
+            if cfg["backend"] == "searxng":
+                print(f"  Instance:   {cfg['searxng_url']}")
+            elif cfg["backend"] == "searxng-public" and cfg.get("searxng_public_url"):
+                print(f"  Instance:   {cfg['searxng_public_url']}")
+            print(f"  Config:     {DIM}{CONFIG_FILE}{RESET}\n")
+            sys.exit(0)
         elif a == "-o":
             open_first = True
+        elif a == "-i":
+            category = "images"
         elif a == "-t" and i + 1 < len(argv):
             i += 1
             time_range = argv[i]
@@ -431,6 +507,11 @@ def main():
 
     if not query:
         sys.exit(0)
+
+    # Handle !bangs — redirect through DuckDuckGo
+    if re.search(r'!\w+', query):
+        handle_bang(query)
+        return
 
     cfg = load_config()
     if backend_override:
@@ -482,9 +563,11 @@ def main():
                 print()
                 break
             if new_q:
+                _cache.clear()
                 query = new_q
                 page = 1
         else:
+            _cache.clear()
             query = ans
             page = 1
 
