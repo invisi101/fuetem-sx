@@ -51,15 +51,39 @@ sx -h                               full help
 
 The installer asks you to pick a backend. You can change it anytime with `sx --setup` or override per-search with `-b`.
 
-### DuckDuckGo (default)
+### 1. DuckDuckGo — no setup needed
 
-Works immediately, no setup needed. Scrapes DuckDuckGo's HTML search with ads filtered out.
+The default. Scrapes DuckDuckGo's HTML search with ads filtered out. Works immediately.
 
-### SearXNG (local)
+### 2. SearXNG (public) — no setup, less reliable
 
-Use your own SearXNG instance. Best results — aggregates multiple search engines, includes infoboxes and suggestions.
+Uses public SearXNG instances. No setup needed, but many instances block the JSON API or rate limit heavily.
 
-Pick option 3 during install or in `sx --setup` and enter your instance URL (e.g. `http://127.0.0.1:8888`).
+During setup you can paste a specific instance URL or leave it blank to let sx cycle through a built-in list.
+
+#### Finding a working public instance
+
+This is unfortunately trial and error. Go to [searx.space](https://searx.space/) and look for instances that:
+
+- Have **green uptime** (high availability)
+- Are hosted in a region close to you (lower latency)
+- Don't require CAPTCHAs or Cloudflare challenges
+
+There's no easy way to tell from the listing whether an instance has JSON enabled. The installer and `sx --setup` will test the instance for you and tell you if it works. Common errors:
+
+- **403 Forbidden** — JSON API is disabled on that instance. Try another.
+- **429 Too Many Requests** — the instance is rate limiting you. Try another.
+- **Could not connect** — the instance is down. Try another.
+
+If you can't find a working public instance, use DuckDuckGo (option 1) or run your own local SearXNG (option 3).
+
+### 3. SearXNG (local) — your own instance, best results
+
+The best option. Aggregates results from multiple search engines (Google, Brave, DuckDuckGo, Wikipedia, etc.), includes infoboxes and suggestions.
+
+You need a local SearXNG instance running. If you don't have one, see [searxng-local](https://github.com/invisi101/searxng-local) for a quick install script.
+
+During setup, enter your instance URL (e.g. `http://127.0.0.1:8888`). The installer tests the connection and tells you if anything needs fixing.
 
 Your instance needs two config changes in `settings.yml`:
 
@@ -81,30 +105,6 @@ Your instance needs two config changes in `settings.yml`:
    - **systemd:** `sudo systemctl restart searxng`
    - **Docker:** `docker restart searxng`
    - **Manual:** stop and re-run your start script
-
-The installer and setup wizard test your connection and walk you through this if anything is wrong.
-
-### SearXNG (public)
-
-Uses public SearXNG instances. No setup needed, but less reliable — many instances block the JSON API or rate limit heavily.
-
-If you leave the instance URL blank during setup, sx will cycle through a built-in list of instances and use the first one that responds. You can also pick a specific instance yourself.
-
-#### Finding a working public instance
-
-This is unfortunately trial and error. Go to [searx.space](https://searx.space/) and look for instances that:
-
-- Have **green uptime** (high availability)
-- Are hosted in a region close to you (lower latency)
-- Don't require CAPTCHAs or Cloudflare challenges
-
-There's no easy way to tell from the listing whether an instance has JSON enabled. The installer and `sx --setup` will test the instance for you and tell you if it works. Common errors:
-
-- **403 Forbidden** — JSON API is disabled on that instance. Try another.
-- **429 Too Many Requests** — the instance is rate limiting you. Try another.
-- **Could not connect** — the instance is down. Try another.
-
-If you can't find a working public instance, consider running your own local SearXNG (option 3) or using DuckDuckGo (option 1) instead.
 
 ## Config
 
